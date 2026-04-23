@@ -2,6 +2,8 @@
 # ─────────────────────────────────────────────────────────────────────────────
 #  Runa OS installer
 #
+#  Crafted by Lone Detective — https://lonedetective.moe
+#
 #  Converts a fresh Raspberry Pi OS Lite (Bookworm, 64-bit) install into
 #  "Runa OS" — a branded, locked-down kiosk appliance — then optionally
 #  installs the RunaNet dashboard on top.
@@ -9,12 +11,12 @@
 #  Usage (on a fresh Pi, as the regular user — usually 'pi', NOT root):
 #
 #      # Recommended (download, inspect, run):
-#      curl -fsSL https://raw.githubusercontent.com/aka-nahal/RunaNet/main/runaos.sh -o runaos.sh
+#      curl -fsSL https://raw.githubusercontent.com/aka-nahal/Runa-OS/main/runaos.sh -o runaos.sh
 #      less runaos.sh
 #      bash runaos.sh
 #
 #      # Or one-shot:
-#      curl -fsSL https://raw.githubusercontent.com/aka-nahal/RunaNet/main/runaos.sh | bash
+#      curl -fsSL https://raw.githubusercontent.com/aka-nahal/Runa-OS/main/runaos.sh | bash
 #
 #  Non-interactive overrides (export before running):
 #      RUNAOS_HOSTNAME=runaos          # default hostname
@@ -123,6 +125,7 @@ BANNER
 say "  ${C_DIM}user:${C_RESET}    $USER_NAME (uid $USER_UID)"
 say "  ${C_DIM}home:${C_RESET}    $USER_HOME"
 say "  ${C_DIM}version:${C_RESET} Runa OS $RUNAOS_VERSION"
+say "  ${C_DIM}by:${C_RESET}      Lone Detective — https://lonedetective.moe"
 say ""
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -185,6 +188,7 @@ sudo tee /etc/issue >/dev/null <<EOF
   |_| \\\\_\\\\\\\\__,_|_| |_|\\\\__,_|  \\\\___/|____/
 \\e[0m
   Runa OS $RUNAOS_VERSION  |  \\n \\l  |  \\4
+  by Lone Detective — https://lonedetective.moe
 
 EOF
 sudo cp /etc/issue /etc/issue.net
@@ -306,6 +310,7 @@ cmd_info() {
         rev="$(git -C "$REPO_DIR" rev-parse --short HEAD 2>/dev/null || echo '?')"
         echo "  runanet: $REPO_DIR @ $rev"
     fi
+    echo "  by:      Lone Detective — https://lonedetective.moe"
 }
 
 cmd_update() {
