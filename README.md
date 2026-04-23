@@ -1,6 +1,6 @@
-# Runa-OS
+# Runa OS
 
-A customized operating system image built on top of **Raspberry Pi OS Lite (64-bit)**, designed to run a locked-down kiosk appliance for RunaNet. The system boots directly into a full-screen React dashboard, served locally by a FastAPI backend, and is remotely manageable via Tailscale.
+Converts a fresh **Raspberry Pi OS Lite (Bookworm, 64-bit)** install into a branded, locked-down kiosk appliance for RunaNet. The system boots directly into a full-screen Next.js dashboard driven by a Python backend, managed via a single `runaos` CLI.
 
 ---
 
@@ -10,15 +10,13 @@ A customized operating system image built on top of **Raspberry Pi OS Lite (64-b
 2. [Stack](#stack)
 3. [Architecture](#architecture)
 4. [Prerequisites](#prerequisites)
-5. [Setup](#setup)
-   - [1. Base OS](#1-base-os)
-   - [2. Display – X11 + Openbox](#2-display--x11--openbox)
-   - [3. App – Chromium Kiosk](#3-app--chromium-kiosk)
-   - [4. Backend – FastAPI](#4-backend--fastapi)
-   - [5. Remote Access – Tailscale](#5-remote-access--tailscale)
-   - [6. Recovery – systemd + Watchdog](#6-recovery--systemd--watchdog)
-6. [Auto-Start on Boot](#auto-start-on-boot)
-7. [Configuration Reference](#configuration-reference)
+5. [Installation](#installation)
+   - [Quick Start](#quick-start)
+   - [Non-Interactive Options](#non-interactive-options)
+   - [Phase 1 – Runa OS Base](#phase-1--runa-os-base)
+   - [Phase 2 – RunaNet Kiosk](#phase-2--runanet-kiosk)
+6. [The `runaos` Command](#the-runaos-command)
+7. [Kiosk Service](#kiosk-service)
 8. [Troubleshooting](#troubleshooting)
 9. [License](#license)
 
@@ -26,13 +24,12 @@ A customized operating system image built on top of **Raspberry Pi OS Lite (64-b
 
 ## Overview
 
-Runa-OS turns any Raspberry Pi 4/5 into a self-healing kiosk appliance:
+Runa OS turns any Raspberry Pi 4/5 into a self-healing kiosk appliance in two phases:
 
-- **No desktop environment overhead** – Openbox is the only window manager; nothing else runs.
-- **Chromium in kiosk mode** loads the local React dashboard at startup.
-- **FastAPI** provides a lightweight REST/WebSocket backend on `localhost`.
-- **Tailscale** gives engineers zero-config remote SSH access without port-forwarding.
-- **systemd** service units + the Linux hardware watchdog keep every component alive.
+- **Phase 1** brands the base OS: hostname, `/etc/os-release`, TTY login banner, MOTD, shell prompt, a `runaos` management command, and a clean quiet boot — without installing any display stack.
+- **Phase 2** (optional) installs the RunaNet dashboard: clones the repo, builds the Next.js frontend, sets up a Python venv, enables the camera, and installs a `runanet-kiosk` systemd service that launches **Cage** (a minimal Wayland compositor) with Chromium in kiosk mode.
+
+Re-running the installer is safe — every step checks before changing anything.
 
 ---
 
@@ -40,12 +37,11 @@ Runa-OS turns any Raspberry Pi 4/5 into a self-healing kiosk appliance:
 
 | Layer | Technology | Purpose |
 |-------|-----------|---------|
-| Base OS | Raspberry Pi OS Lite 64-bit | Minimal Debian-based foundation |
-| Display | X11 + Openbox | Lightweight windowing, no DE |
-| App | Chromium (kiosk mode) | Full-screen React dashboard |
-| Backend | FastAPI (Python) | Local REST/WebSocket API |
-| Remote | Tailscale | Secure remote SSH/management |
-| Recovery | systemd restart + watchdog | Auto-recovery from crashes |
+| Base OS | Raspberry Pi OS Lite 64-bit (Bookworm) | Minimal Debian-based foundation |
+| Display | Cage (Wayland) | Single-application Wayland compositor |
+| App | Chromium (kiosk mode) | Full-screen Next.js dashboard |
+| Backend | Python (`start.py` + venv) | Local REST/WebSocket API, camera |
+| Recovery | systemd `Restart=always` | Auto-recovery from crashes |
 
 ---
 
@@ -55,20 +51,19 @@ Runa-OS turns any Raspberry Pi 4/5 into a self-healing kiosk appliance:
 ┌──────────────────────────────────────────────────────┐
 │                    Raspberry Pi                       │
 │                                                      │
-│  ┌──────────┐   autostart   ┌────────────────────┐  │
-│  │  Openbox │ ────────────► │  Chromium (kiosk)  │  │
-│  └──────────┘               │  localhost:3000     │  │
-│       ▲                     └────────┬───────────┘  │
-│       │ X11                          │ HTTP/WS       │
-│  ┌────┴─────┐               ┌────────▼───────────┐  │
-│  │   Xorg   │               │  FastAPI backend   │  │
-│  └──────────┘               │  localhost:8000     │  │
-│                             └────────────────────┘  │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  systemd: runanet-kiosk.service              │   │
+│  │                                              │   │
+│  │  cage ──► chromium (kiosk) ──► localhost     │   │
+│  │               │                              │   │
+│  │               └──► start.py (Python venv)    │   │
+│  │                    frontend  (Next.js build) │   │
+│  └──────────────────────────────────────────────┘   │
 │                                                      │
-│  ┌──────────────────────┐   ┌────────────────────┐  │
-│  │  systemd + watchdog  │   │     Tailscale       │  │
-│  │  (service recovery)  │   │  (remote access)    │  │
-│  └──────────────────────┘   └────────────────────┘  │
+│  ┌──────────────────────────────────────────────┐   │
+│  │  systemd: Restart=always (RestartSec=5)      │   │
+│  │  auto-recovery if kiosk crashes              │   │
+│  └──────────────────────────────────────────────┘   │
 └──────────────────────────────────────────────────────┘
 ```
 
@@ -76,314 +71,170 @@ Runa-OS turns any Raspberry Pi 4/5 into a self-healing kiosk appliance:
 
 ## Prerequisites
 
-- Raspberry Pi 4 or 5 (2 GB RAM minimum, 4 GB recommended)
+- Raspberry Pi 4 or 5
 - MicroSD card (16 GB minimum, Class 10 / A1)
-- [Raspberry Pi Imager](https://www.raspberrypi.com/software/) or `dd`
+- [Raspberry Pi Imager](https://www.raspberrypi.com/software/) — flash **Raspberry Pi OS Lite (64-bit, Bookworm)**
 - Network connection for initial package installation
-- A Tailscale account (free tier is sufficient)
+- Node.js ≥ 18 (the installer warns if the system version is older)
 
 ---
 
-## Setup
+## Installation
 
-### 1. Base OS
+### Quick Start
 
-Flash **Raspberry Pi OS Lite (64-bit)** to your SD card:
+Run as your **regular user** (e.g. `pi`) — **not root**. The script will `sudo` when needed.
 
 ```bash
-# Using Raspberry Pi Imager (GUI) – select "Raspberry Pi OS Lite (64-bit)"
-# Or with dd:
-sudo dd if=raspios-lite-arm64.img of=/dev/sdX bs=4M status=progress conv=fsync
+# Recommended — download, inspect, then run:
+curl -fsSL https://raw.githubusercontent.com/aka-nahal/RunaNet/main/runaos.sh -o runaos.sh
+less runaos.sh
+bash runaos.sh
 ```
 
-Enable SSH and configure Wi-Fi via the Imager's advanced settings, or manually:
-
 ```bash
-# On the boot partition:
-touch /Volumes/bootfs/ssh
-cat > /Volumes/bootfs/wpa_supplicant.conf <<EOF
-ctrl_interface=DIR=/var/run/wpa_supplicant GROUP=netdev
-update_config=1
-country=US
-
-network={
-    ssid="YourSSID"
-    psk="YourPassword"
-}
-EOF
+# Or one-shot:
+curl -fsSL https://raw.githubusercontent.com/aka-nahal/RunaNet/main/runaos.sh | bash
 ```
 
-After first boot, update the system:
+The installer walks through Phase 1 automatically and then asks whether to install the RunaNet kiosk (Phase 2). Answer **Y** for a full kiosk appliance.
+
+After installation, reboot to start the kiosk:
 
 ```bash
-sudo apt update && sudo apt full-upgrade -y
 sudo reboot
 ```
 
 ---
 
-### 2. Display – X11 + Openbox
+### Non-Interactive Options
 
-Install the minimal display stack:
+Export any of these variables before running to skip prompts:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RUNAOS_HOSTNAME` | `runaos` | Hostname for the device |
+| `RUNAOS_INSTALL_RUNANET` | *(asks)* | `yes` or `no` — skip the Phase 2 prompt |
+| `RUNAOS_REPO_URL` | `https://github.com/aka-nahal/RunaNet.git` | Repository to clone |
+| `RUNAOS_BRANCH` | `main` | Branch to clone |
+| `RUNAOS_NONINTERACTIVE` | `0` | Set to `1` to accept all defaults silently |
+
+Example — fully unattended install with the kiosk:
 
 ```bash
-sudo apt install -y \
-    xserver-xorg-core \
-    xinit \
-    openbox \
-    x11-xserver-utils \
-    unclutter          # hides the mouse cursor after inactivity
-```
-
-Create `/etc/X11/xorg.conf.d/10-monitor.conf` if you need to force a specific resolution:
-
-```
-Section "Monitor"
-    Identifier "HDMI-1"
-    Option     "PreferredMode" "1920x1080"
-EndSection
-```
-
-Disable screen blanking and DPMS in `/etc/X11/xorg.conf.d/99-kiosk.conf`:
-
-```
-Section "ServerFlags"
-    Option "BlankTime"  "0"
-    Option "StandbyTime" "0"
-    Option "SuspendTime" "0"
-    Option "OffTime"    "0"
-EndSection
+export RUNAOS_HOSTNAME=kiosk-01
+export RUNAOS_INSTALL_RUNANET=yes
+export RUNAOS_NONINTERACTIVE=1
+bash runaos.sh
 ```
 
 ---
 
-### 3. App – Chromium Kiosk
+### Phase 1 – Runa OS Base
 
-Install Chromium:
+Phase 1 runs unconditionally and makes the following changes:
 
-```bash
-sudo apt install -y chromium-browser
-```
-
-Create the Openbox autostart file at `~/.config/openbox/autostart`:
-
-```bash
-mkdir -p ~/.config/openbox
-
-cat > ~/.config/openbox/autostart <<'EOF'
-# Hide cursor after 5 seconds of inactivity
-unclutter -idle 5 -root &
-
-# Wait for the backend to be ready
-until curl -sf http://localhost:8000/health; do sleep 1; done
-
-# Launch Chromium in kiosk mode
-chromium-browser \
-    --kiosk \
-    --noerrdialogs \
-    --disable-infobars \
-    --disable-session-crashed-bubble \
-    --disable-restore-session-state \
-    --no-first-run \
-    --check-for-update-interval=31536000 \
-    --app=http://localhost:3000 &
-EOF
-```
-
-The React dashboard is expected to be served on port `3000` (e.g., via `serve` or embedded in the FastAPI app as static files).
+| Step | What happens |
+|------|-------------|
+| Base utilities | Installs `curl`, `git`, `ca-certificates`, `lsb-release` |
+| Hostname | Sets `/etc/hostname` and `/etc/hosts` to the chosen name |
+| OS branding | Overwrites `/etc/os-release` with Runa OS identity (original backed up to `/etc/os-release.runaos.bak`) |
+| TTY banner | Installs an ASCII-art login banner in `/etc/issue` and `/etc/issue.net` |
+| MOTD | Replaces `/etc/update-motd.d/` with a dynamic MOTD showing host, IP, kernel, uptime, load, and temperature |
+| Shell prompt | Adds `/etc/profile.d/runaos.sh` with a colour-coded `[runaos]` PS1 |
+| `runaos` CLI | Installs `/usr/local/bin/runaos` (see [The `runaos` Command](#the-runaos-command)) |
+| Quiet boot | Adds `quiet loglevel=3 logo.nologo vt.global_cursor_default=0 fastboot` to `cmdline.txt` and sets `disable_splash=1` in `config.txt` |
 
 ---
 
-### 4. Backend – FastAPI
+### Phase 2 – RunaNet Kiosk
 
-Install Python dependencies:
+Phase 2 is optional (prompted, or controlled by `RUNAOS_INSTALL_RUNANET`):
 
-```bash
-sudo apt install -y python3-pip python3-venv
+| Step | What happens |
+|------|-------------|
+| Kiosk packages | Installs `cage`, `chromium-browser`, `nodejs`, `npm`, `python3-venv`, `python3-opencv`, `rpicam-apps`, `seatd`, and friends |
+| Repo | Clones (or updates) `https://github.com/aka-nahal/RunaNet.git` to `~/RunaNet` |
+| Camera | Enables `camera_auto_detect=1` in `config.txt`; adds user to `video`, `render`, and `input` groups |
+| Python venv | Creates `~/RunaNet/.venv` with `--system-site-packages` so apt's OpenCV/picamera2 are visible; installs `backend/requirements.txt` |
+| Frontend | Runs `npm install` + `npm run build` inside `~/RunaNet/frontend` (first build ~5–10 min on a Pi 4/5) |
+| systemd service | Installs and enables `runanet-kiosk.service` (see [Kiosk Service](#kiosk-service)) |
 
-python3 -m venv /opt/runa/venv
-source /opt/runa/venv/bin/activate
-pip install fastapi uvicorn
+> **Note:** A reboot is required after Phase 2 if the camera config or group membership changed.
+
+---
+
+## The `runaos` Command
+
+`/usr/local/bin/runaos` is installed in Phase 1 and provides quick system info and kiosk control:
+
+```
+runaos              # quick health snapshot (default)
+runaos update       # apt update/upgrade + pull RunaNet + rebuild frontend
+runaos help         # full command reference
 ```
 
-Create a minimal FastAPI app at `/opt/runa/app/main.py`:
+Kiosk commands (available after Phase 2):
 
-```python
-from fastapi import FastAPI
-from fastapi.staticfiles import StaticFiles
-
-app = FastAPI()
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
-# Serve the built React app
-app.mount("/", StaticFiles(directory="/opt/runa/dashboard/build", html=True), name="static")
 ```
-
-Start the server (see [Auto-Start on Boot](#auto-start-on-boot) for the systemd unit):
-
-```bash
-/opt/runa/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+runaos start        # start the kiosk now
+runaos stop         # stop the kiosk
+runaos restart      # restart the kiosk
+runaos status       # systemd status for the kiosk
+runaos logs         # tail kiosk logs (follow mode)
+runaos enable       # enable autostart on boot (and start now)
+runaos disable      # disable autostart (and stop now)
 ```
 
 ---
 
-### 5. Remote Access – Tailscale
+## Kiosk Service
 
-Install and authenticate Tailscale:
-
-```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up --ssh
-```
-
-Once authenticated, the device appears in your Tailscale admin console. SSH in from any device on your tailnet:
-
-```bash
-ssh pi@<tailscale-ip>
-```
-
-To advertise an exit node or use ACLs, adjust your Tailscale policy in the admin console.
-
----
-
-### 6. Recovery – systemd + Watchdog
-
-#### systemd Service Units
-
-Create `/etc/systemd/system/runa-backend.service`:
+The kiosk runs as a single systemd unit: **`runanet-kiosk.service`**
 
 ```ini
 [Unit]
-Description=Runa FastAPI Backend
-After=network.target
-StartLimitIntervalSec=60
-StartLimitBurst=5
+Description=Runa OS Kiosk (cage + RunaNet)
+Wants=network-online.target
+After=network-online.target systemd-user-sessions.service getty@tty1.service
+Conflicts=getty@tty1.service
 
 [Service]
-User=pi
-WorkingDirectory=/opt/runa/app
-ExecStart=/opt/runa/venv/bin/uvicorn main:app --host 127.0.0.1 --port 8000
-Restart=on-failure
+Type=simple
+User=<your-user>
+PAMName=login
+TTYPath=/dev/tty1
+ExecStart=/usr/bin/cage -ds -- .venv/bin/python start.py
+Restart=always
 RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
+TimeoutStartSec=600
 ```
 
-Create `/etc/systemd/system/runa-kiosk.service`:
+Key points:
 
-```ini
-[Unit]
-Description=Runa Kiosk (X11 + Openbox + Chromium)
-After=runa-backend.service graphical.target
-Requires=runa-backend.service
+- **Cage** (`cage -ds`) is a minimal Wayland compositor that runs exactly one application.
+- **`start.py`** launches the Python backend and passes a URL to Chromium in kiosk mode.
+- The service conflicts with `getty@tty1` so they don't fight for the console.
+- `Restart=always` with `RestartSec=5` means the kiosk recovers automatically from crashes.
 
-[Service]
-User=pi
-Environment=DISPLAY=:0
-ExecStart=/usr/bin/startx /usr/bin/openbox-session
-Restart=on-failure
-RestartSec=5
-
-[Install]
-WantedBy=graphical.target
-```
-
-Enable both services:
+Useful log commands:
 
 ```bash
-sudo systemctl daemon-reload
-sudo systemctl enable runa-backend.service runa-kiosk.service
-sudo systemctl start  runa-backend.service runa-kiosk.service
+runaos logs                        # follow kiosk logs via runaos CLI
+journalctl -fu runanet-kiosk       # or directly via journalctl
 ```
-
-#### Hardware Watchdog
-
-Enable the BCM2835 hardware watchdog so the Pi reboots automatically if the kernel hangs:
-
-```bash
-# Load the watchdog module on boot
-echo "dtparam=watchdog=on" | sudo tee -a /boot/firmware/config.txt
-
-sudo apt install -y watchdog
-
-# Configure /etc/watchdog.conf
-sudo tee /etc/watchdog.conf <<'EOF'
-watchdog-device = /dev/watchdog
-watchdog-timeout = 15
-interval        = 5
-max-load-1      = 24
-EOF
-
-sudo systemctl enable watchdog
-sudo systemctl start  watchdog
-```
-
-Additionally, add `WatchdogSec` to each service unit to let systemd use the watchdog interface:
-
-```ini
-[Service]
-...
-WatchdogSec=30
-NotifyAccess=main
-```
-
----
-
-## Auto-Start on Boot
-
-Set the Pi to boot to the **console (text) runlevel** rather than a graphical session, and let the kiosk service handle the display:
-
-```bash
-sudo systemctl set-default multi-user.target
-```
-
-Enable auto-login for the `pi` user so the kiosk service can launch X without a password prompt:
-
-```bash
-sudo mkdir -p /etc/systemd/system/getty@tty1.service.d
-sudo tee /etc/systemd/system/getty@tty1.service.d/autologin.conf <<'EOF'
-[Service]
-ExecStart=
-ExecStart=-/sbin/agetty --autologin pi --noclear %I $TERM
-EOF
-```
-
----
-
-## Configuration Reference
-
-| Variable / File | Default | Description |
-|----------------|---------|-------------|
-| `BACKEND_PORT` | `8000` | Uvicorn listen port |
-| `DASHBOARD_PORT` | `3000` | React dev server (if separate) |
-| `/opt/runa/app/main.py` | – | FastAPI application entry point |
-| `/opt/runa/dashboard/build` | – | React production build output |
-| `~/.config/openbox/autostart` | – | Openbox startup commands |
-| `/etc/watchdog.conf` | – | Hardware watchdog settings |
-| `/boot/firmware/config.txt` | – | Raspberry Pi firmware config |
 
 ---
 
 ## Troubleshooting
 
-| Symptom | Likely Cause | Fix |
+| Symptom | Likely cause | Fix |
 |---------|-------------|-----|
-| Black screen on boot | X11 not starting | Check `journalctl -u runa-kiosk` |
-| Chromium shows "connection refused" | Backend not ready | Verify `systemctl status runa-backend` |
-| No remote SSH access | Tailscale not authenticated | Run `sudo tailscale up --ssh` again |
-| Pi reboots unexpectedly | Watchdog timeout | Increase `watchdog-timeout` in `/etc/watchdog.conf` |
-| Kiosk restarts in a loop | Chromium crash loop | Check `~/.config/chromium/` for corrupt profile; delete and retry |
-
-View live logs:
-
-```bash
-journalctl -fu runa-backend.service
-journalctl -fu runa-kiosk.service
-```
+| Black screen on boot | Kiosk service not starting | `runaos status` → check journal |
+| Chromium shows blank page | Frontend not built or backend not ready | `runaos logs`; check `~/RunaNet/frontend/.next/BUILD_ID` exists |
+| Camera not working | User not in `video`/`render` groups | Reboot after Phase 2 install |
+| Kiosk restart loop | `start.py` crash | `runaos logs`; check Python venv and `backend/requirements.txt` |
+| Node version warning | System Node < 18 | Install Node 20 from [NodeSource](https://github.com/nodesource/distributions) |
 
 ---
 
