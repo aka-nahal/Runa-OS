@@ -1,0 +1,8 @@
+{
+  "permissions": {
+    "allow": [
+      "WebFetch(domain:lonedetective.moe)",
+      "Bash(bash -n runaos.sh)"
+    ]
+  }
+}
