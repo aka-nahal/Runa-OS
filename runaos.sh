@@ -23,6 +23,7 @@
 #      RUNAOS_INSTALL_RUNANET=yes|no   # skip the prompt
 #      RUNAOS_REPO_URL=https://...     # override clone URL
 #      RUNAOS_BRANCH=main              # branch to clone
+#      RUNAOS_SWAP=yes|no              # grow swap to 2 GiB for the build, or skip
 #      RUNAOS_NONINTERACTIVE=1         # accept all defaults silently
 #
 #  Re-running is safe: every step checks before changing anything.
@@ -784,16 +785,34 @@ UNIT
 sudo systemctl daemon-reload
 ok "Kiosk service unit installed (autostart enabled once build succeeds)"
 
-# 2f. Grow swap if RAM+swap is tight — Next.js builds on 1-2 GB Pis otherwise
-# hit the OOM killer and leave the build half-finished. The swapfile stays
-# grown after this run; extra swap on a Pi is harmless.
+# 2f. Optionally grow swap. Next.js builds on 1-2 GB Pis without swap will
+# hit the OOM killer and leave the build half-finished. But extra swap costs
+# ~2 GiB of SD card and shortens flash life on heavy-write workloads, so we
+# ask before doing it. Set RUNAOS_SWAP=yes|no to skip the prompt.
 ensure_swap_for_build() {
-    local total_kib
+    local total_kib mem_mib want_swap
     total_kib="$(awk '/^MemTotal:|^SwapTotal:/ {sum += $2} END {print sum+0}' /proc/meminfo)"
+    mem_mib=$((total_kib / 1024))
     if (( total_kib >= 2621440 )); then
         return 0
     fi
-    info "RAM+swap low ($((total_kib / 1024)) MiB) — growing swap to 2 GiB for the frontend build"
+
+    want_swap="${RUNAOS_SWAP:-}"
+    if [[ -z "$want_swap" ]]; then
+        warn "RAM+swap is low (${mem_mib} MiB). Next.js builds may OOM without ~2 GiB total."
+        if ask_yn "Grow swap to 2 GiB for the build? (writes a 2 GiB swapfile to disk)" "Y"; then
+            want_swap="yes"
+        else
+            want_swap="no"
+        fi
+    fi
+
+    if [[ "$want_swap" != "yes" ]]; then
+        warn "Skipping swap setup — build may OOM with only ${mem_mib} MiB RAM+swap."
+        return 0
+    fi
+
+    info "Growing swap to 2 GiB for the frontend build"
     if [[ -f /etc/dphys-swapfile ]]; then
         sudo dphys-swapfile swapoff >/dev/null 2>&1 || true
         sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=2048/' /etc/dphys-swapfile
