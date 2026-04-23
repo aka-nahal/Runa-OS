@@ -430,16 +430,23 @@ info "Phase 2: Installing RunaNet kiosk"
 
 # 2a. Kiosk apt packages (mirrors install-rpi-lite.sh)
 info "Installing kiosk packages (cage, chromium, node, opencv, libcamera…)"
+# Bookworm renamed/replaced a couple of packages — pick whichever is available.
+chromium_pkg="chromium"
+apt-cache show "$chromium_pkg" >/dev/null 2>&1 || chromium_pkg="chromium-browser"
+
+polkit_pkg="polkitd"
+apt-cache show "$polkit_pkg" >/dev/null 2>&1 || polkit_pkg="policykit-1"
+
 sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
     cage \
-    chromium-browser \
+    "$chromium_pkg" \
     fonts-dejavu-core \
     libgl1 libglib2.0-0 \
     nodejs npm \
     python3-venv python3-pip python3-dev \
     python3-opencv python3-numpy \
     rpicam-apps \
-    seatd policykit-1 \
+    seatd "$polkit_pkg" \
     xdg-utils
 
 node_major="$(node -v 2>/dev/null | sed 's/^v//;s/\..*//')"
