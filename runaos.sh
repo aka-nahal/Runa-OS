@@ -264,8 +264,22 @@ set -euo pipefail
 
 VERSION="$(. /etc/os-release 2>/dev/null && echo "${RUNAOS_VERSION:-?}")"
 REPO_DIR="${HOME}/RunaNet"
+KIOSK_UNIT="/etc/systemd/system/runanet-kiosk.service"
 have_runanet() { [ -d "$REPO_DIR/.git" ]; }
-have_kiosk()   { systemctl list-unit-files runanet-kiosk.service >/dev/null 2>&1; }
+have_kiosk()   { [ -f "$KIOSK_UNIT" ]; }
+
+# Read uptime from /proc directly — `uptime -p` can stall on a freshly
+# converted system that hasn't been rebooted yet.
+read_uptime() {
+    local secs
+    [ -r /proc/uptime ] || { echo ""; return; }
+    secs="$(awk '{print int($1)}' /proc/uptime 2>/dev/null)" || { echo ""; return; }
+    local d=$((secs/86400)) h=$(((secs%86400)/3600)) m=$(((secs%3600)/60))
+    local out=""
+    [ "$d" -gt 0 ] && out="${d}d "
+    out="${out}${h}h ${m}m"
+    echo "$out"
+}
 
 print_help() {
     cat <<USAGE
@@ -296,12 +310,12 @@ USAGE
 
 cmd_info() {
     echo "Runa OS $VERSION"
-    echo "  host:    $(hostname)"
+    echo "  host:    $(hostname 2>/dev/null)"
     echo "  ip:      $(hostname -I 2>/dev/null | awk '{print $1}')"
     echo "  kernel:  $(uname -r)"
-    echo "  up:      $(uptime -p 2>/dev/null | sed 's/^up //')"
+    echo "  up:      $(read_uptime)"
     if have_kiosk; then
-        echo "  kiosk:   $(systemctl is-active runanet-kiosk 2>/dev/null || echo unknown)"
+        echo "  kiosk:   $(timeout 3 systemctl is-active runanet-kiosk 2>/dev/null || echo unknown)"
     else
         echo "  kiosk:   not installed"
     fi
