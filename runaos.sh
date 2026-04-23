@@ -514,7 +514,9 @@ mkdir -p "$REPO_DIR/data"
 echo "skipped on Runa OS Lite ($(date -u +%FT%TZ))" > "$REPO_DIR/data/.pywebview-install-skipped"
 
 # 2e. Frontend (first-time build can take 5-10 min on a Pi)
-if [[ ! -d "$REPO_DIR/frontend/node_modules" ]]; then
+# Check for the actual `next` binary, not just the directory — a previous
+# interrupted run can leave a partial node_modules without the build tools.
+if [[ ! -x "$REPO_DIR/frontend/node_modules/.bin/next" ]]; then
     info "Installing frontend dependencies"
     ( cd "$REPO_DIR/frontend" && npm install --silent )
 fi
