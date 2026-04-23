@@ -92,6 +92,25 @@ ask_yn() {
     [[ "$reply" =~ ^[Yy] ]]
 }
 
+# retry N cmd… — run cmd up to N times with exponential backoff.
+# Used for network-ish steps (npm install) where a transient failure shouldn't
+# kill the whole install. Under `set -e`, exhausting retries still aborts.
+retry() {
+    local max="$1"; shift
+    local delay=5 attempt=1 rc=0
+    while (( attempt <= max )); do
+        if "$@"; then return 0; fi
+        rc=$?
+        if (( attempt < max )); then
+            warn "Command failed (rc=$rc, attempt $attempt/$max); retrying in ${delay}s…"
+            sleep "$delay"
+            delay=$((delay * 2))
+        fi
+        attempt=$((attempt + 1))
+    done
+    return "$rc"
+}
+
 # ── Pre-flight ───────────────────────────────────────────────────────────────
 [[ "$(uname -s)" == "Linux" ]] || die "Runa OS only installs on Linux. Got: $(uname -s)"
 [[ $EUID -ne 0 ]] || die "Run as your regular user (e.g. 'pi'), not root. The script will sudo when needed."
@@ -635,26 +654,41 @@ fi
 
 info "Phase 2: Installing RunaNet kiosk"
 
-# 2a. Kiosk apt packages (mirrors install-rpi-lite.sh)
-info "Installing kiosk packages (cage, chromium, node, opencv, libcamera…)"
-# Bookworm renamed/replaced a couple of packages — pick whichever is available.
+# 2a. Kiosk apt packages — split into required + optional so a missing
+# optional package on a newer Debian release can't abort the whole install.
+info "Installing kiosk packages (cage, chromium, node, polkit…)"
+
+# Codename-dependent names — detect whichever apt knows about.
 chromium_pkg="chromium"
 apt-cache show "$chromium_pkg" >/dev/null 2>&1 || chromium_pkg="chromium-browser"
 
 polkit_pkg="polkitd"
 apt-cache show "$polkit_pkg" >/dev/null 2>&1 || polkit_pkg="policykit-1"
 
-sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-    cage \
-    "$chromium_pkg" \
-    fonts-dejavu-core \
-    libgl1 libglib2.0-0 \
-    nodejs npm \
-    python3-venv python3-pip python3-dev \
-    python3-opencv python3-numpy \
-    rpicam-apps \
-    seatd "$polkit_pkg" \
+apt_required=(
+    cage "$chromium_pkg"
+    fonts-dejavu-core
+    libgl1 libglib2.0-0
+    nodejs npm
+    python3-venv python3-pip python3-dev
+    seatd "$polkit_pkg"
     xdg-utils
+)
+# Nice-to-have: camera/CV stack. Kiosk boots fine without them, so a missing
+# package on a future release just warns instead of aborting.
+apt_optional=(
+    python3-opencv python3-numpy
+    rpicam-apps
+)
+
+sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "${apt_required[@]}"
+for pkg in "${apt_optional[@]}"; do
+    if sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends "$pkg" >/dev/null 2>&1; then
+        ok "optional: $pkg"
+    else
+        warn "optional: $pkg unavailable on $BASE_CODENAME — skipping"
+    fi
+done
 
 node_major="$(node -v 2>/dev/null | sed 's/^v//;s/\..*//')"
 if [[ -z "$node_major" || "$node_major" -lt 18 ]]; then
@@ -706,21 +740,11 @@ mkdir -p "$REPO_DIR/data"
 # Skip pywebview on Lite — cage+Chromium is the actual window
 echo "skipped on Runa OS Lite ($(date -u +%FT%TZ))" > "$REPO_DIR/data/.pywebview-install-skipped"
 
-# 2e. Frontend (first-time build can take 5-10 min on a Pi)
-# Check for the actual `next` binary, not just the directory — a previous
-# interrupted run can leave a partial node_modules without the build tools.
-if [[ ! -x "$REPO_DIR/frontend/node_modules/.bin/next" ]]; then
-    info "Installing frontend dependencies"
-    ( cd "$REPO_DIR/frontend" && npm install --silent )
-fi
-if [[ ! -f "$REPO_DIR/frontend/.next/BUILD_ID" ]]; then
-    info "Building frontend (first run only — ~5-10 minutes on a Pi 4/5)"
-    ( cd "$REPO_DIR/frontend" && npm run build )
-fi
-ok "Frontend ready"
-
-# 2f. systemd kiosk unit (embedded — no separate file needed)
-info "Installing systemd kiosk service"
+# 2e. Install the systemd kiosk unit NOW — before the slow build. That way
+# the unit file is always present once Phase 2 gets this far, so `runaos start`
+# works, and if the frontend build is interrupted, re-running the installer
+# resumes from the build step with autostart wiring already in place.
+info "Installing systemd kiosk service unit"
 sudo tee /etc/systemd/system/runanet-kiosk.service >/dev/null <<UNIT
 [Unit]
 Description=Runa OS Kiosk (cage + RunaNet)
@@ -757,12 +781,52 @@ TimeoutStartSec=600
 [Install]
 WantedBy=multi-user.target
 UNIT
-
-# getty@tty1 would fight cage for the console — disable it.
-sudo systemctl disable getty@tty1.service 2>/dev/null || true
 sudo systemctl daemon-reload
+ok "Kiosk service unit installed (autostart enabled once build succeeds)"
+
+# 2f. Grow swap if RAM+swap is tight — Next.js builds on 1-2 GB Pis otherwise
+# hit the OOM killer and leave the build half-finished. The swapfile stays
+# grown after this run; extra swap on a Pi is harmless.
+ensure_swap_for_build() {
+    local total_kib
+    total_kib="$(awk '/^MemTotal:|^SwapTotal:/ {sum += $2} END {print sum+0}' /proc/meminfo)"
+    if (( total_kib >= 2621440 )); then
+        return 0
+    fi
+    info "RAM+swap low ($((total_kib / 1024)) MiB) — growing swap to 2 GiB for the frontend build"
+    if [[ -f /etc/dphys-swapfile ]]; then
+        sudo dphys-swapfile swapoff >/dev/null 2>&1 || true
+        sudo sed -i 's/^CONF_SWAPSIZE=.*/CONF_SWAPSIZE=2048/' /etc/dphys-swapfile
+        sudo dphys-swapfile setup >/dev/null
+        sudo dphys-swapfile swapon >/dev/null
+        ok "Swap grown to 2 GiB"
+    else
+        warn "dphys-swapfile not present — cannot grow swap. Build may OOM."
+    fi
+}
+ensure_swap_for_build
+
+# 2g. Frontend install + build. First build is ~5-10 min on a Pi 4/5.
+# node_modules/.bin/next is the real "installed" marker — a partial
+# node_modules from an interrupted run won't have it.
+if [[ ! -x "$REPO_DIR/frontend/node_modules/.bin/next" ]]; then
+    info "Installing frontend dependencies (retries on transient network errors)"
+    retry 3 bash -c "cd '$REPO_DIR/frontend' && npm install --no-audit --no-fund --loglevel=error"
+fi
+if [[ ! -f "$REPO_DIR/frontend/.next/BUILD_ID" ]]; then
+    info "Building frontend (first run only — ~5-10 minutes on a Pi 4/5)"
+    # Cap V8 heap so the build doesn't blow past available RAM+swap.
+    ( cd "$REPO_DIR/frontend" && NODE_OPTIONS="--max-old-space-size=2048" npm run build )
+fi
+ok "Frontend ready"
+
+# 2h. Lock in autostart. Everything the service needs now exists, so it's
+# safe to enable — and safe to disable the getty that would fight cage for
+# the console at boot.
+info "Enabling kiosk autostart on boot"
+sudo systemctl disable getty@tty1.service 2>/dev/null || true
 sudo systemctl enable runanet-kiosk.service
-ok "Kiosk service enabled"
+ok "Autostart enabled — kiosk launches on tty1 at every boot"
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 say ""
