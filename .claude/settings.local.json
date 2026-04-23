@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "WebFetch(domain:lonedetective.moe)",
-      "Bash(bash -n runaos.sh)"
+      "Bash(bash -n runaos.sh)",
+      "Bash(bash -n /c/Users/ld/Documents/GitHub/Runa-OS/runaos-tui.sh)",
+      "Bash(chmod +x /c/Users/ld/Documents/GitHub/Runa-OS/runaos-tui.sh)",
+      "Bash(bash -n /c/Users/ld/Documents/GitHub/Runa-OS/runaos.sh)",
+      "Bash(bash -n C:/Users/ld/Documents/GitHub/Runa-OS/runaos.sh)",
+      "Bash(git rm *)"
     ]
   }
 }

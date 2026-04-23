@@ -110,6 +110,26 @@ USER_NAME="$USER"
 USER_UID="$(id -u)"
 USER_HOME="$HOME"
 
+# ── Base OS detection ────────────────────────────────────────────────────────
+# Pull VERSION_CODENAME (bookworm, trixie, bullseye, …) from the original
+# /etc/os-release so branding stays correct on future Raspberry Pi OS releases
+# instead of being frozen on "Bookworm". If a previous run already overwrote
+# os-release, fall back to the backup we saved then.
+detect_base_os() {
+    local src="/etc/os-release"
+    [[ -f /etc/os-release.runaos.bak ]] && src="/etc/os-release.runaos.bak"
+    (
+        # shellcheck disable=SC1090
+        . "$src" 2>/dev/null || true
+        printf "%s\t%s\t%s\n" \
+            "${VERSION_CODENAME:-unknown}" \
+            "${VERSION_ID:-unknown}" \
+            "${PRETTY_NAME:-unknown}"
+    )
+}
+IFS=$'\t' read -r BASE_CODENAME BASE_VERSION_ID BASE_PRETTY < <(detect_base_os)
+BASE_CODENAME_PRETTY="${BASE_CODENAME^}"
+
 # ── Banner ───────────────────────────────────────────────────────────────────
 cat <<'BANNER'
 
@@ -125,8 +145,180 @@ BANNER
 say "  ${C_DIM}user:${C_RESET}    $USER_NAME (uid $USER_UID)"
 say "  ${C_DIM}home:${C_RESET}    $USER_HOME"
 say "  ${C_DIM}version:${C_RESET} Runa OS $RUNAOS_VERSION"
+say "  ${C_DIM}base:${C_RESET}    $BASE_PRETTY (codename: $BASE_CODENAME)"
 say "  ${C_DIM}by:${C_RESET}      Lone Detective — https://lonedetective.moe"
 say ""
+
+# ── Mode: TUI (whiptail dialogs) or CLI (text prompts) ───────────────────────
+# If the environment already answered everything (NONINTERACTIVE=1) or there
+# is no terminal to talk to, skip this and let the CLI flow use env vars.
+if [[ "$NONINTERACTIVE" != "1" && -n "$PROMPT_FD" ]]; then
+    printf "%sChoose interface%s — [T]UI dialog boxes or [C]LI text prompts? [T/c]: " "$C_BOLD" "$C_RESET" >&2
+    IFS= read -r -u "$PROMPT_FD" MODE_REPLY || MODE_REPLY=""
+    MODE_REPLY="${MODE_REPLY:-T}"
+
+    if [[ "$MODE_REPLY" =~ ^[Tt] ]]; then
+        if ! command -v whiptail >/dev/null; then
+            info "Installing whiptail for TUI mode"
+            sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq whiptail >/dev/null
+        fi
+
+        export NEWT_COLORS='
+root=,black
+window=,black
+border=white,black
+title=brightcyan,black
+textbox=white,black
+button=black,cyan
+actbutton=white,cyan
+entry=white,black
+'
+        TUI_BACKTITLE="Runa OS Installer v$RUNAOS_VERSION  —  Lone Detective"
+        tui_cancel() {
+            whiptail --backtitle "$TUI_BACKTITLE" --title "Cancelled" \
+                --msgbox "Installation cancelled. Nothing has been changed yet." 8 60
+            exit 0
+        }
+
+        whiptail --backtitle "$TUI_BACKTITLE" --title "Welcome" --msgbox "\
+Runa OS Installer
+
+This will convert this Raspberry Pi OS Lite (Bookworm, 64-bit) install
+into Runa OS — a branded, locked-down kiosk appliance — and optionally
+install the RunaNet dashboard on top.
+
+Re-running is safe: every step checks before changing anything." 14 72
+
+        while :; do
+            TUI_HOST="$(whiptail --backtitle "$TUI_BACKTITLE" --title "Hostname" \
+                --inputbox "Hostname for this device.\nAllowed: letters, digits, hyphen. Max 63 chars." \
+                10 70 "$DEFAULT_HOSTNAME" 3>&1 1>&2 2>&3)" || tui_cancel
+            TUI_HOST="$(printf "%s" "$TUI_HOST" | tr -cd 'a-zA-Z0-9-' | head -c 63)"
+            [[ -n "$TUI_HOST" ]] && break
+            whiptail --backtitle "$TUI_BACKTITLE" --title "Invalid hostname" \
+                --msgbox "Hostname can't be empty after cleaning. Try again." 8 60
+        done
+        DEFAULT_HOSTNAME="$TUI_HOST"
+
+        if whiptail --backtitle "$TUI_BACKTITLE" --title "RunaNet Kiosk" --yesno "\
+Install the RunaNet dashboard kiosk now?
+
+This will:
+  • install cage, chromium, node, python3 deps
+  • clone RunaNet into \$HOME/RunaNet
+  • build the frontend (first run: ~5-10 min on a Pi)
+  • enable the systemd kiosk service on tty1
+
+You can skip and re-run the installer later to add it." 16 72; then
+            RUNAOS_INSTALL_RUNANET="yes"
+        else
+            RUNAOS_INSTALL_RUNANET="no"
+        fi
+        export RUNAOS_INSTALL_RUNANET
+
+        if [[ "$RUNAOS_INSTALL_RUNANET" == "yes" ]]; then
+            if whiptail --backtitle "$TUI_BACKTITLE" --title "Advanced" \
+                --yesno "Customize RunaNet repo URL / branch?\n\nDefaults are fine for almost everyone." 10 70; then
+                REPO_URL="$(whiptail --backtitle "$TUI_BACKTITLE" --title "Repo URL" \
+                    --inputbox "Git repo to clone for RunaNet:" 10 72 "$REPO_URL" 3>&1 1>&2 2>&3)" || tui_cancel
+                REPO_BRANCH="$(whiptail --backtitle "$TUI_BACKTITLE" --title "Branch" \
+                    --inputbox "Branch to check out:" 10 72 "$REPO_BRANCH" 3>&1 1>&2 2>&3)" || tui_cancel
+            fi
+        fi
+
+        TUI_SUMMARY="Ready to install with the following settings:
+
+  Hostname        : $DEFAULT_HOSTNAME
+  Install RunaNet : $RUNAOS_INSTALL_RUNANET"
+        if [[ "$RUNAOS_INSTALL_RUNANET" == "yes" ]]; then
+            TUI_SUMMARY="$TUI_SUMMARY
+  Repo URL        : $REPO_URL
+  Branch          : $REPO_BRANCH"
+        fi
+        TUI_SUMMARY="$TUI_SUMMARY
+
+User            : $USER_NAME ($USER_HOME)
+
+Proceed?"
+        whiptail --backtitle "$TUI_BACKTITLE" --title "Confirm" --yesno "$TUI_SUMMARY" 18 72 || tui_cancel
+
+        # Collected everything — switch to silent mode so the rest of the
+        # script uses the values we just gathered without re-prompting.
+        NONINTERACTIVE=1
+        clear
+        say "${C_CYAN}${C_BOLD}────────────────────────────────────────────────────────────────${C_RESET}"
+        say "${C_CYAN}${C_BOLD}  Runa OS installer — running with your selections${C_RESET}"
+        say "${C_CYAN}${C_BOLD}────────────────────────────────────────────────────────────────${C_RESET}"
+        say ""
+    fi
+fi
+
+# ── Verifier ─────────────────────────────────────────────────────────────────
+# Runs at the end of each install path. Checks every artifact Phase 1 (and
+# Phase 2 when RunaNet was installed) is supposed to have left behind. Does
+# not modify anything — safe to re-run at any time. Does NOT touch SSH or
+# Pi-connection state by design.
+run_verifier() {
+    say ""
+    say "${C_CYAN}${C_BOLD}────────────────────────────────────────────────────────────────${C_RESET}"
+    say "${C_CYAN}${C_BOLD}  Runa OS verifier${C_RESET}"
+    say "${C_CYAN}${C_BOLD}────────────────────────────────────────────────────────────────${C_RESET}"
+
+    local v_pass=0 v_fail=0
+    _v() {
+        local label="$1"; shift
+        if "$@" >/dev/null 2>&1; then
+            ok "$label"
+            v_pass=$((v_pass + 1))
+        else
+            err "$label"
+            v_fail=$((v_fail + 1))
+        fi
+    }
+
+    # Phase 1 — branding & boot polish
+    _v "os-release branded (ID=runaos)"     grep -q '^ID=runaos' /etc/os-release
+    _v "os-release codename = $BASE_CODENAME" grep -q "^VERSION_CODENAME=$BASE_CODENAME" /etc/os-release
+    _v "os-release original backed up"      test -f /etc/os-release.runaos.bak
+    _v "hostname file set"                  grep -qx "${TARGET_HOST:-$DEFAULT_HOSTNAME}" /etc/hostname
+    _v "login banner branded"               grep -q 'Runa OS' /etc/issue
+    _v "MOTD script installed"              test -x /etc/update-motd.d/00-runaos
+    _v "shell prompt profile installed"     test -f /etc/profile.d/runaos.sh
+    _v "runaos command installed"           test -x /usr/local/bin/runaos
+    _v "runaos command runs"                /usr/local/bin/runaos help
+    if [[ -n "${CMDLINE:-}" && -f "${CMDLINE:-/nonexistent}" ]]; then
+        _v "quiet boot cmdline"             grep -qw quiet "$CMDLINE"
+    fi
+    if [[ -n "${CONFIG:-}" && -f "${CONFIG:-/nonexistent}" ]]; then
+        _v "rainbow splash disabled"        grep -q '^disable_splash=1' "$CONFIG"
+    fi
+    _v "tty1 getty override installed"      test -f /etc/systemd/system/getty@tty1.service.d/runaos.conf
+
+    # Phase 2 — only when RunaNet was installed this run
+    if [[ "${INSTALL_RUNANET:-no}" == "yes" ]]; then
+        _v "RunaNet repo cloned"            test -d "$REPO_DIR/.git"
+        _v "python venv present"            test -x "$REPO_DIR/.venv/bin/python"
+        _v "backend requirements present"   test -f "$REPO_DIR/backend/requirements.txt"
+        _v "frontend deps installed"        test -x "$REPO_DIR/frontend/node_modules/.bin/next"
+        _v "frontend build artifact"        test -f "$REPO_DIR/frontend/.next/BUILD_ID"
+        _v "kiosk service unit installed"   test -f /etc/systemd/system/runanet-kiosk.service
+        _v "kiosk service enabled"          systemctl is-enabled runanet-kiosk.service
+        _v "getty@tty1 disabled"            bash -c '! systemctl is-enabled getty@tty1.service 2>/dev/null | grep -qx enabled'
+        _v "user in video group"            bash -c "id -nG '$USER_NAME' | grep -qw video"
+        _v "user in render group"           bash -c "id -nG '$USER_NAME' | grep -qw render"
+        _v "user in input group"            bash -c "id -nG '$USER_NAME' | grep -qw input"
+    fi
+
+    say ""
+    if [[ "$v_fail" -eq 0 ]]; then
+        say "${C_GREEN}${C_BOLD}  Verifier: all $v_pass checks passed.${C_RESET}"
+    else
+        say "${C_YELLOW}${C_BOLD}  Verifier: $v_pass passed, $v_fail failed.${C_RESET}"
+        say "${C_DIM}  Re-run the installer after addressing any failed checks.${C_RESET}"
+    fi
+    say ""
+}
 
 # ─────────────────────────────────────────────────────────────────────────────
 #  PHASE 1 — Convert base OS into Runa OS (branding + boot polish)
@@ -163,11 +355,11 @@ if [[ ! -f /etc/os-release.runaos.bak ]]; then
     sudo cp /etc/os-release /etc/os-release.runaos.bak
 fi
 sudo tee /etc/os-release >/dev/null <<EOF
-PRETTY_NAME="Runa OS $RUNAOS_VERSION (Bookworm)"
+PRETTY_NAME="Runa OS $RUNAOS_VERSION ($BASE_CODENAME_PRETTY)"
 NAME="Runa OS"
 VERSION_ID="$RUNAOS_VERSION"
-VERSION="$RUNAOS_VERSION (Bookworm)"
-VERSION_CODENAME=bookworm
+VERSION="$RUNAOS_VERSION ($BASE_CODENAME_PRETTY)"
+VERSION_CODENAME=$BASE_CODENAME
 ID=runaos
 ID_LIKE="debian raspbian"
 HOME_URL="https://github.com/aka-nahal/RunaNet"
@@ -437,6 +629,7 @@ if [[ "$INSTALL_RUNANET" != "yes" ]]; then
     say "  System info:          ${C_BOLD}runaos${C_RESET}"
     say "  Install RunaNet later: re-run this script and answer Y."
     say ""
+    run_verifier
     exit 0
 fi
 
@@ -591,3 +784,5 @@ say ""
 if [[ "${REBOOT_REQUIRED:-}" == "1" ]]; then
     warn "Camera config and/or group changes were made — a reboot is required."
 fi
+
+run_verifier
