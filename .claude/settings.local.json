@@ -7,7 +7,10 @@
       "Bash(chmod +x /c/Users/ld/Documents/GitHub/Runa-OS/runaos-tui.sh)",
       "Bash(bash -n /c/Users/ld/Documents/GitHub/Runa-OS/runaos.sh)",
       "Bash(bash -n C:/Users/ld/Documents/GitHub/Runa-OS/runaos.sh)",
-      "Bash(git rm *)"
+      "Bash(git rm *)",
+      "mcp__code-review-graph__get_architecture_overview_tool",
+      "Bash(command -v shellcheck)",
+      "Bash(shellcheck -S warning runaos.sh)"
     ]
   }
 }
