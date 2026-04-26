@@ -10,7 +10,11 @@
       "Bash(git rm *)",
       "mcp__code-review-graph__get_architecture_overview_tool",
       "Bash(command -v shellcheck)",
-      "Bash(shellcheck -S warning runaos.sh)"
+      "Bash(shellcheck -S warning runaos.sh)",
+      "Bash(bash -n /home/ld/Documents/GitHub/Runa-OS/runaos.sh)",
+      "Bash(awk \"/ *)",
+      "Bash(bash -n -)",
+      "Bash(shellcheck -S warning -e SC2034,SC1090,SC1091 /home/ld/Documents/GitHub/Runa-OS/runaos.sh)"
     ]
   }
 }

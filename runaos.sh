@@ -182,6 +182,17 @@ has_kiosk_unit()    { [[ -f /etc/systemd/system/runanet-kiosk.service ]]; }
 kiosk_enabled()     { systemctl is-enabled runanet-kiosk.service >/dev/null 2>&1; }
 kiosk_active()      { systemctl is-active runanet-kiosk.service >/dev/null 2>&1; }
 
+# Returns 0 if anything HTTP-speaking answers on 127.0.0.1:$1 within 3s.
+# Any status code (2xx/3xx/4xx/5xx) counts — we only care that the server
+# is up. Returns 1 if no response, 2 if curl is missing.
+kiosk_http_responds() {
+    local port="${1:-3000}" code
+    command -v curl >/dev/null 2>&1 || return 2
+    code="$(curl -sS -o /dev/null --max-time 3 -w '%{http_code}' \
+            "http://127.0.0.1:$port" 2>/dev/null || echo 000)"
+    [[ "$code" != "000" ]]
+}
+
 get_status_plain() {
     local hn ip kern mem swap
     hn="$(hostname 2>/dev/null)"
@@ -282,6 +293,23 @@ run_verifier() {
         if [[ "$DO_KIOSK_ENABLE" == "yes" ]]; then
             _v "kiosk service enabled"          systemctl is-enabled runanet-kiosk.service
             _v "getty@tty1 disabled"            bash -c '! systemctl is-enabled getty@tty1.service 2>/dev/null | grep -qx enabled'
+            # Active != rendering. The unit can be `active` while the inner
+            # cage/python/Next chain is silently stalled (e.g. launcher.py's
+            # readiness check rejects 3xx redirects and never advances). Poll
+            # the frontend port directly so a black-screen-with-cursor failure
+            # surfaces here instead of only on the attached display.
+            info "Probing dashboard on :3000 (up to 90s for first frontend boot)…"
+            local probe_ok=0 probe_secs=0
+            while (( probe_secs < 90 )); do
+                if kiosk_http_responds 3000; then probe_ok=1; break; fi
+                sleep 3; probe_secs=$((probe_secs + 3))
+            done
+            _v "dashboard answers HTTP on :3000 within 90s" \
+                bash -c "[[ $probe_ok -eq 1 ]]"
+            if (( probe_ok == 0 )); then
+                warn "  Kiosk service is enabled but the dashboard never answered HTTP."
+                warn "  Run 'runaos doctor' for a deeper diagnostic, or 'runaos logs' to tail."
+            fi
         fi
         _v "user in video group"            bash -c "id -nG '$USER_NAME' | grep -qw video"
         _v "user in render group"           bash -c "id -nG '$USER_NAME' | grep -qw render"
@@ -447,8 +475,19 @@ set -euo pipefail
 VERSION="$(. /etc/os-release 2>/dev/null && echo "${RUNAOS_VERSION:-?}")"
 REPO_DIR="${HOME}/RunaNet"
 KIOSK_UNIT="/etc/systemd/system/runanet-kiosk.service"
+FRONTEND_PORT="${RUNAOS_FRONTEND_PORT:-3000}"
+BACKEND_PORT="${RUNAOS_BACKEND_PORT:-8000}"
 have_runanet() { [ -d "$REPO_DIR/.git" ]; }
 have_kiosk()   { [ -f "$KIOSK_UNIT" ]; }
+
+# 0=responds, 1=no response, 2=curl missing. Any HTTP status counts as up.
+http_responds() {
+    local port="$1" code
+    command -v curl >/dev/null 2>&1 || return 2
+    code="$(curl -sS -o /dev/null --max-time 3 -w '%{http_code}' \
+            "http://127.0.0.1:$port" 2>/dev/null || echo 000)"
+    [ "$code" != "000" ]
+}
 
 # Read uptime from /proc directly — `uptime -p` can stall on a freshly
 # converted system that hasn't been rebooted yet.
@@ -482,6 +521,7 @@ Kiosk service (only when RunaNet is installed)
   logs                tail kiosk logs (follow mode)
   enable              enable autostart on boot (and start now)
   disable             disable autostart (and stop now)
+  doctor              deep diagnostic — for "black screen" / silent stalls
 
 Examples
   runaos              # quick health snapshot
@@ -497,7 +537,18 @@ cmd_info() {
     echo "  kernel:  $(uname -r)"
     echo "  up:      $(read_uptime)"
     if have_kiosk; then
-        echo "  kiosk:   $(timeout 3 systemctl is-active runanet-kiosk 2>/dev/null || echo unknown)"
+        local active health
+        active="$(timeout 3 systemctl is-active runanet-kiosk 2>/dev/null || echo unknown)"
+        if [ "$active" = "active" ]; then
+            if http_responds "$FRONTEND_PORT"; then
+                health="rendering"
+            else
+                health="STALLED — no response on :$FRONTEND_PORT (try 'runaos doctor')"
+            fi
+            echo "  kiosk:   $active — $health"
+        else
+            echo "  kiosk:   $active"
+        fi
     else
         echo "  kiosk:   not installed"
     fi
@@ -540,6 +591,114 @@ require_kiosk() {
     have_kiosk || { echo "runanet-kiosk service is not installed. Run runaos.sh to install it." >&2; exit 1; }
 }
 
+# Print one diagnostic line. Format: "  label : verdict (detail)".
+diag() { printf "  %-32s %s\n" "$1" "$2"; }
+
+cmd_doctor() {
+    echo "Runa OS doctor — kiosk diagnostic"
+    echo
+
+    echo "[1] systemd unit"
+    if have_kiosk; then
+        local enabled active substate
+        enabled="$(systemctl is-enabled runanet-kiosk 2>/dev/null || echo unknown)"
+        active="$(systemctl is-active runanet-kiosk 2>/dev/null || echo unknown)"
+        substate="$(systemctl show -p SubState --value runanet-kiosk 2>/dev/null || echo ?)"
+        diag "unit installed"          "yes ($KIOSK_UNIT)"
+        diag "is-enabled"              "$enabled"
+        diag "is-active / sub-state"   "$active / $substate"
+        if [ "$active" != "active" ]; then
+            echo "  → unit is not active. Last 20 journal lines:"
+            journalctl -u runanet-kiosk -n 20 --no-pager 2>/dev/null | sed 's/^/      /'
+        fi
+    else
+        diag "unit installed"          "NO — run runaos.sh"
+        return 0
+    fi
+    echo
+
+    echo "[2] frontend reachability (:$FRONTEND_PORT)"
+    if command -v ss >/dev/null 2>&1; then
+        local listener
+        listener="$(ss -ltnH "sport = :$FRONTEND_PORT" 2>/dev/null | head -n1)"
+        if [ -n "$listener" ]; then
+            diag "tcp listener on :$FRONTEND_PORT" "yes ($(echo "$listener" | awk '{print $4}'))"
+        else
+            diag "tcp listener on :$FRONTEND_PORT" "NONE — frontend never bound the port"
+        fi
+    fi
+    if command -v curl >/dev/null 2>&1; then
+        local code time
+        code="$(curl -sS -o /dev/null --max-time 5 -w '%{http_code}' \
+                "http://127.0.0.1:$FRONTEND_PORT" 2>/dev/null || echo 000)"
+        time="$(curl -sS -o /dev/null --max-time 5 -w '%{time_total}s' \
+                "http://127.0.0.1:$FRONTEND_PORT" 2>/dev/null || echo n/a)"
+        if [ "$code" = "000" ]; then
+            diag "HTTP probe 127.0.0.1"   "no response (server not up)"
+        else
+            diag "HTTP probe 127.0.0.1"   "HTTP $code in $time"
+        fi
+    else
+        diag "HTTP probe"               "skipped — curl not installed"
+    fi
+    echo
+
+    echo "[3] backend reachability (:$BACKEND_PORT)"
+    if command -v curl >/dev/null 2>&1; then
+        local bcode
+        bcode="$(curl -sS -o /dev/null --max-time 5 -w '%{http_code}' \
+                 "http://127.0.0.1:$BACKEND_PORT" 2>/dev/null || echo 000)"
+        if [ "$bcode" = "000" ]; then
+            diag "HTTP probe 127.0.0.1"   "no response"
+        else
+            diag "HTTP probe 127.0.0.1"   "HTTP $bcode"
+        fi
+    fi
+    echo
+
+    echo "[4] artifacts"
+    if have_runanet; then
+        diag "RunaNet repo"             "yes ($REPO_DIR)"
+        [ -x "$REPO_DIR/.venv/bin/python" ] \
+            && diag "python venv"        "yes" \
+            || diag "python venv"        "MISSING ($REPO_DIR/.venv/bin/python)"
+        [ -f "$REPO_DIR/frontend/.next/BUILD_ID" ] \
+            && diag "frontend build"     "yes ($(cat "$REPO_DIR/frontend/.next/BUILD_ID" 2>/dev/null))" \
+            || diag "frontend build"     "MISSING — run 'cd $REPO_DIR/frontend && npm run build'"
+    else
+        diag "RunaNet repo"             "NOT cloned ($REPO_DIR)"
+    fi
+    echo
+
+    echo "[5] groups for $USER"
+    for g in video render input; do
+        if id -nG "$USER" 2>/dev/null | tr ' ' '\n' | grep -qx "$g"; then
+            diag "in '$g' group"        "yes"
+        else
+            diag "in '$g' group"        "NO — cage may fail to grab DRM/input"
+        fi
+    done
+    echo
+
+    echo "[6] verdict"
+    local active code
+    active="$(systemctl is-active runanet-kiosk 2>/dev/null || echo unknown)"
+    code="$(curl -sS -o /dev/null --max-time 3 -w '%{http_code}' \
+            "http://127.0.0.1:$FRONTEND_PORT" 2>/dev/null || echo 000)"
+    if [ "$active" = "active" ] && [ "$code" != "000" ]; then
+        echo "  ✓ Kiosk is running and the dashboard is responding (HTTP $code)."
+        echo "    If the screen is still black, this is a display-stack issue:"
+        echo "    check 'journalctl -u runanet-kiosk -b' for cage / EGL errors."
+    elif [ "$active" = "active" ] && [ "$code" = "000" ]; then
+        echo "  ✗ Service is active but the frontend never answered HTTP."
+        echo "    Most likely: launcher.py readiness check is rejecting a 3xx redirect"
+        echo "    from Next.js, OR the frontend build is missing, OR a child process"
+        echo "    crashed silently. See 'runaos logs' and the [4] artifacts section above."
+    else
+        echo "  ✗ Service is not active (state: $active). See journal output in [1]."
+    fi
+}
+
 case "${1:-info}" in
     info|"")            cmd_info ;;
     update)             cmd_update ;;
@@ -551,6 +710,7 @@ case "${1:-info}" in
     logs)               require_kiosk; journalctl -u runanet-kiosk -f ;;
     enable)             require_kiosk; sudo systemctl enable --now  runanet-kiosk ;;
     disable)            require_kiosk; sudo systemctl disable --now runanet-kiosk ;;
+    doctor)             require_kiosk; cmd_doctor ;;
     *) echo "Unknown command: $1" >&2; print_help >&2; exit 1 ;;
 esac
 RUNACMD
