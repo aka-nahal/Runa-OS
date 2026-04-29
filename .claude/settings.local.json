@@ -14,7 +14,8 @@
       "Bash(bash -n /home/ld/Documents/GitHub/Runa-OS/runaos.sh)",
       "Bash(awk \"/ *)",
       "Bash(bash -n -)",
-      "Bash(shellcheck -S warning -e SC2034,SC1090,SC1091 /home/ld/Documents/GitHub/Runa-OS/runaos.sh)"
+      "Bash(shellcheck -S warning -e SC2034,SC1090,SC1091 /home/ld/Documents/GitHub/Runa-OS/runaos.sh)",
+      "Bash(chmod +x /home/ld/Documents/GitHub/Runa-OS/runaos.sh)"
     ]
   }
 }
